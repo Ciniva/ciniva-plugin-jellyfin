@@ -14,8 +14,9 @@ pub struct State {
     pub server_id: String,
     pub public_url: Option<String>,
     pub version: String,
-    /// PlaySessionId → Ciniva transcode session, so stopping playback can stop the transcode.
-    pub transcodes: Mutex<HashMap<String, String>>,
+    /// PlaySessionId → Ciniva transcode session and the request that started it, so repeated playlist requests reuse
+    /// it and stopping playback stops it.
+    pub transcodes: Mutex<HashMap<String, (String, serde_json::Value)>>,
 }
 
 pub type Shared = Arc<State>;

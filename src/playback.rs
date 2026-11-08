@@ -343,16 +343,27 @@ async fn start_transcode(st: &Shared, auth: &Auth, id: &str, q: &Q) -> ApiResult
     let fid = resolve_file(st, &auth.token, id, q).await?;
     let f = st.ciniva.file(&auth.token, fid).await?;
     let request = hls_request(q, &f);
+    // Held across the whole start so concurrent playlist requests for one play session can't each start a transcode.
+    let mut sessions = st.transcodes.lock().await;
+    let ps = q.get("playsessionid").map(str::to_string);
+    if let Some((old, old_request)) = ps.as_ref().and_then(|ps| sessions.get(ps).cloned()) {
+        if old_request == request && transcode_alive(st, &auth.token, &old).await {
+            return Ok((old, request));
+        }
+        sessions.remove(ps.as_deref().unwrap_or_default());
+        // Stop before starting, so the old session's GPU slot is free when Ciniva picks a device for the new one.
+        let _ = st.ciniva.send(Some(&auth.token), Method::DELETE, &format!("/transcode/{old}"), &json!({})).await;
+    }
     let r: Value = st.ciniva.send(Some(&auth.token), Method::POST, &format!("/files/{fid}/transcode"), &request).await?.json().await.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let sid = r["session"].as_str().ok_or_else(|| ApiError(StatusCode::BAD_GATEWAY, "Ciniva did not start a transcode".into()))?.to_string();
-    if let Some(ps) = q.get("playsessionid") {
-        if let Some(old) = st.transcodes.lock().await.insert(ps.to_string(), sid.clone()) {
-            if old != sid {
-                let _ = st.ciniva.send(Some(&auth.token), Method::DELETE, &format!("/transcode/{old}"), &json!({})).await;
-            }
-        }
+    if let Some(ps) = ps {
+        sessions.insert(ps, (sid.clone(), request.clone()));
     }
     Ok((sid, request))
+}
+
+async fn transcode_alive(st: &Shared, token: &str, sid: &str) -> bool {
+    st.ciniva.raw(token, Method::GET, &format!("/transcode/{sid}/index.m3u8"), &HeaderMap::new()).await.is_ok_and(|r| r.status().is_success())
 }
 
 fn m3u8(body: String) -> Response {
@@ -417,7 +428,7 @@ pub async fn stop_encoding(State(st): State<Shared>, auth: Auth, q: Q) -> Status
 }
 
 async fn stop_session(st: &Shared, token: &str, play_session: &str) {
-    let sid = st.transcodes.lock().await.remove(play_session);
+    let sid = st.transcodes.lock().await.remove(play_session).map(|(sid, _)| sid);
     if let Some(sid) = sid {
         let _ = st.ciniva.send(Some(token), Method::DELETE, &format!("/transcode/{sid}"), &json!({})).await;
     }
