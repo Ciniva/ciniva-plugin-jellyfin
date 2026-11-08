@@ -182,7 +182,7 @@ async fn main() {
         server_id: ids::server_id(&server_name),
         server_name,
         public_url: public_url.clone(),
-        version: env("JELLYFIN_VERSION").unwrap_or_else(|| "10.11.0".into()),
+        version: env("JELLYFIN_VERSION").unwrap_or_else(|| "10.11.11".into()),
         transcodes: Default::default(),
     });
     if secret.is_some() {
