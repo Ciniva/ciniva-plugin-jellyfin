@@ -140,9 +140,8 @@ fn dolby_vision_ok(profile: &Value, f: &File) -> bool {
         .all(|c| condition_holds(c, &props))
 }
 
-/// Tizen's HTML5 player sends no new range request when seeking past what it buffered in an MKV, so long seeks do
-/// nothing; HLS seeks by segment instead.
-fn seeks_mkv_badly(client: &crate::app::Client) -> bool {
+/// Samsung TVs running Jellyfin for Tizen.
+fn is_tizen(client: &crate::app::Client) -> bool {
     [&client.client, &client.device].into_iter().flatten().any(|s| {
         let s = s.to_ascii_lowercase();
         s.contains("tizen") || s.contains("samsung")
@@ -189,7 +188,9 @@ pub async fn playback_info(State(st): State<Shared>, auth: Auth, Path(id): Path<
         }
         let mut src = items::media_source(&cx, &item_id, f, &name, i == 0);
         let over_bitrate = matches!((max_bitrate, f.probe.as_ref().and_then(|p| p.bitrate)), (Some(m), Some(b)) if m > 0 && b > m);
-        let mkv_on_tizen = container_of(f) == "mkv" && seeks_mkv_badly(&auth.client);
+        // Tizen's HTML5 player sends no new range request when seeking past what it buffered in an MKV, so long seeks
+        // do nothing; HLS seeks by segment instead.
+        let mkv_on_tizen = container_of(f) == "mkv" && is_tizen(&auth.client);
         let direct = enable_direct_play && !over_bitrate && !mkv_on_tizen && profile.as_ref().is_none_or(|p| can_direct_play(p, f, audio_index));
         if let Some(p) = &profile {
             let has_external = field(p, "SubtitleProfiles").and_then(|v| v.as_array()).is_some_and(|l| {
@@ -236,6 +237,12 @@ pub async fn playback_info(State(st): State<Shared>, auth: Auth, Path(id): Path<
                 }
                 if profile.as_ref().is_some_and(|p| !dolby_vision_ok(p, f)) {
                     url.push_str("&DolbyVision=false");
+                }
+                // Tizen 5.5 freezes on HEVC in fMP4 segments but plays it in MPEG-TS, which its HLS profile asks for.
+                // The playlist request carries no client headers, so the choice rides in the URL. Other clients keep
+                // Ciniva's default container.
+                if is_tizen(&auth.client) {
+                    url.push_str(&format!("&SegmentContainer={}", t.container));
                 }
                 if enable_direct_stream && !over_bitrate && f.probe.as_ref().and_then(|p| p.video.as_ref()).is_some_and(|v| t.video_codecs.contains(&v.codec.to_ascii_lowercase())) {
                     url.push_str("&AllowVideoStreamCopy=true");
@@ -366,6 +373,7 @@ fn hls_request(q: &Q, f: &File) -> Value {
         "audio_copy": if audio_codecs.is_empty() { "aac".to_string() } else { audio_codecs.join(",") },
         "video_copy": if copy_video { probe.video.as_ref().map(|v| v.codec.clone()) } else { None },
         "dolby_vision": q.bool("dolbyvision").unwrap_or(true),
+        "container": q.get("segmentcontainer").map(str::to_ascii_lowercase),
     })
 }
 
@@ -663,7 +671,17 @@ mod tests {
     #[test]
     fn tizen_is_recognised() {
         let c = |client: &str| crate::app::Client { client: Some(client.into()), ..Default::default() };
-        assert!(seeks_mkv_badly(&c("Samsung Smart TV")));
-        assert!(!seeks_mkv_badly(&c("Jellyfin Web")));
+        assert!(is_tizen(&c("Samsung Smart TV")));
+        assert!(!is_tizen(&c("Jellyfin Web")));
+    }
+
+    #[test]
+    fn hls_request_passes_the_segment_container() {
+        let f = file("/a.mkv", "hevc", 10, "aac");
+        let request = |q: &str| hls_request(&Q::parse(Some(q)), &f);
+        assert_eq!(request("TranscodingContainer=ts&SegmentContainer=TS")["container"], "ts");
+        assert_eq!(request("SegmentContainer=mp4")["container"], "mp4");
+        // Only the Tizen URL carries SegmentContainer; everyone else leaves Ciniva on its default.
+        assert!(request("TranscodingContainer=ts")["container"].is_null());
     }
 }
