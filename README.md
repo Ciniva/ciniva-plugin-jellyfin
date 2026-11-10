@@ -6,8 +6,8 @@ progress. Users sign in with their Ciniva accounts; the bridge keeps no state of
 
 ## Image
 
-`ghcr.io/ciniva/ciniva-plugin-jellyfin` (built by GitHub Actions on every push to `main`; tags `latest`,
-`sha-<short>`, and `X.Y.Z` for `vX.Y.Z` tags).
+`ghcr.io/ciniva/ciniva-plugin-jellyfin` (published by GitHub Actions for `vX.Y.Z` tags matching `Cargo.toml` as
+`X.Y.Z`, `latest` and `sha-<short>`; run the workflow by hand to publish any branch as `sha-<short>`).
 
 The image includes the official Jellyfin web client (jellyfin-web 10.11.11, GPL-2.0, copied from the pinned
 `jellyfin/jellyfin` image) at `/web/`, which Jellyfin Desktop and Jellyfin Media Player load after connecting. Set
