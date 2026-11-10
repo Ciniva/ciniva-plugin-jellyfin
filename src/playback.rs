@@ -124,6 +124,31 @@ pub fn can_direct_play(profile: &Value, f: &File, audio_index: Option<i64>) -> b
     })
 }
 
+/// Whether the profile's range-type rules for this video codec admit Dolby Vision. Without them the TV is trusted.
+fn dolby_vision_ok(profile: &Value, f: &File) -> bool {
+    let Some(probe) = f.probe.as_ref() else { return true };
+    let Some(v) = probe.video.as_ref().filter(|v| v.dolby_vision_profile.is_some()) else { return true };
+    let vcodec = v.codec.to_ascii_lowercase();
+    let props = Props { probe, audio: None };
+    field(profile, "CodecProfiles")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|cp| cp["Type"] == "Video" && codec_matches(&split(cp.get("Codec")), &vcodec))
+        .flat_map(|cp| cp["Conditions"].as_array().into_iter().flatten())
+        .filter(|c| c["Property"] == "VideoRangeType")
+        .all(|c| condition_holds(c, &props))
+}
+
+/// Tizen's HTML5 player sends no new range request when seeking past what it buffered in an MKV, so long seeks do
+/// nothing; HLS seeks by segment instead.
+fn seeks_mkv_badly(client: &crate::app::Client) -> bool {
+    [&client.client, &client.device].into_iter().flatten().any(|s| {
+        let s = s.to_ascii_lowercase();
+        s.contains("tizen") || s.contains("samsung")
+    })
+}
+
 struct Transcode {
     video_codecs: Vec<String>,
     audio_codecs: Vec<String>,
@@ -164,7 +189,8 @@ pub async fn playback_info(State(st): State<Shared>, auth: Auth, Path(id): Path<
         }
         let mut src = items::media_source(&cx, &item_id, f, &name, i == 0);
         let over_bitrate = matches!((max_bitrate, f.probe.as_ref().and_then(|p| p.bitrate)), (Some(m), Some(b)) if m > 0 && b > m);
-        let direct = enable_direct_play && !over_bitrate && profile.as_ref().is_none_or(|p| can_direct_play(p, f, audio_index));
+        let mkv_on_tizen = container_of(f) == "mkv" && seeks_mkv_badly(&auth.client);
+        let direct = enable_direct_play && !over_bitrate && !mkv_on_tizen && profile.as_ref().is_none_or(|p| can_direct_play(p, f, audio_index));
         if let Some(p) = &profile {
             let has_external = field(p, "SubtitleProfiles").and_then(|v| v.as_array()).is_some_and(|l| {
                 l.iter().any(|s| s["Method"] == "External" && ["vtt", "webvtt", "srt", "subrip"].contains(&s["Format"].as_str().unwrap_or("").to_lowercase().as_str()))
@@ -207,6 +233,9 @@ pub async fn playback_info(State(st): State<Shared>, auth: Auth, Path(id): Path<
                 }
                 if let Some(a) = audio_index {
                     url.push_str(&format!("&AudioStreamIndex={a}"));
+                }
+                if profile.as_ref().is_some_and(|p| !dolby_vision_ok(p, f)) {
+                    url.push_str("&DolbyVision=false");
                 }
                 if enable_direct_stream && !over_bitrate && f.probe.as_ref().and_then(|p| p.video.as_ref()).is_some_and(|v| t.video_codecs.contains(&v.codec.to_ascii_lowercase())) {
                     url.push_str("&AllowVideoStreamCopy=true");
@@ -336,6 +365,7 @@ fn hls_request(q: &Q, f: &File) -> Value {
         "audio_channels": if channels >= 6 && max_channels >= 6 { 6 } else { 2 },
         "audio_copy": if audio_codecs.is_empty() { "aac".to_string() } else { audio_codecs.join(",") },
         "video_copy": if copy_video { probe.video.as_ref().map(|v| v.codec.clone()) } else { None },
+        "dolby_vision": q.bool("dolbyvision").unwrap_or(true),
     })
 }
 
@@ -615,5 +645,25 @@ mod tests {
     fn srt_conversion() {
         let vtt = "WEBVTT\n\n00:01.000 --> 00:02.500\nHello\n\n01:00:00.000 --> 01:00:01.000 align:start\nBye\nnow\n";
         assert_eq!(vtt_to_srt(vtt), "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n2\n01:00:00,000 --> 01:00:01,000\nBye\nnow\n\n");
+    }
+
+    #[test]
+    fn dolby_vision_follows_range_type_rules() {
+        let mut f = file("/a.mkv", "hevc", 10, "aac");
+        f.probe.as_mut().unwrap().video.as_mut().unwrap().dolby_vision_profile = Some(8);
+        let rule = |types: &str| json!({ "CodecProfiles": [
+            { "Type": "Video", "Codec": "hevc", "Conditions": [{ "Condition": "EqualsAny", "Property": "VideoRangeType", "Value": types }] }
+        ] });
+        assert!(!dolby_vision_ok(&rule("SDR|HDR10|HLG"), &f));
+        assert!(dolby_vision_ok(&rule("SDR|HDR10|HLG|DOVI|DOVIWithHDR10"), &f));
+        assert!(dolby_vision_ok(&json!({}), &f));
+        assert!(dolby_vision_ok(&rule("SDR"), &file("/b.mkv", "hevc", 10, "aac")));
+    }
+
+    #[test]
+    fn tizen_is_recognised() {
+        let c = |client: &str| crate::app::Client { client: Some(client.into()), ..Default::default() };
+        assert!(seeks_mkv_badly(&c("Samsung Smart TV")));
+        assert!(!seeks_mkv_badly(&c("Jellyfin Web")));
     }
 }
