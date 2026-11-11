@@ -3,17 +3,18 @@ use crate::{
     ciniva::{File, MediaInfo},
     ids::{secs_to_ticks, ticks_to_ms, Id, Kind},
     items::{self, container_of, default_audio_index},
+    livetv,
     library::{self, files_for, resolve, Resolved},
 };
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{Path, RawQuery, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde_json::{json, Value};
 
-fn new_play_session() -> String {
+pub fn new_play_session() -> String {
     use rand::RngCore;
     let mut b = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut b);
@@ -141,20 +142,21 @@ fn dolby_vision_ok(profile: &Value, f: &File) -> bool {
 }
 
 /// Samsung TVs running Jellyfin for Tizen.
-fn is_tizen(client: &crate::app::Client) -> bool {
+pub fn is_tizen(client: &crate::app::Client) -> bool {
     [&client.client, &client.device].into_iter().flatten().any(|s| {
         let s = s.to_ascii_lowercase();
         s.contains("tizen") || s.contains("samsung")
     })
 }
 
-struct Transcode {
-    video_codecs: Vec<String>,
-    audio_codecs: Vec<String>,
-    container: String,
+pub struct Transcode {
+    pub video_codecs: Vec<String>,
+    pub audio_codecs: Vec<String>,
+    pub container: String,
+    pub max_audio_channels: Option<i64>,
 }
 
-fn transcoding_profile(profile: &Value) -> Transcode {
+pub fn transcoding_profile(profile: &Value) -> Transcode {
     let list = field(profile, "TranscodingProfiles").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let p = list
         .iter()
@@ -164,10 +166,14 @@ fn transcoding_profile(profile: &Value) -> Transcode {
         video_codecs: p.map(|p| split(p.get("VideoCodec"))).unwrap_or_default(),
         audio_codecs: p.map(|p| split(p.get("AudioCodec"))).unwrap_or_default(),
         container: p.and_then(|p| p["Container"].as_str()).unwrap_or("ts").to_string(),
+        max_audio_channels: p.and_then(|p| p["MaxAudioChannels"].as_str().and_then(|s| s.parse().ok()).or_else(|| p["MaxAudioChannels"].as_i64())),
     }
 }
 
 pub async fn playback_info(State(st): State<Shared>, auth: Auth, Path(id): Path<String>, q: Q, body: Bytes) -> ApiResult {
+    if let Some(hex) = livetv::channel_hex(&id) {
+        return livetv::playback_info(&st, &auth, &id.replace('-', "").to_ascii_lowercase(), &hex, &q, &body).await;
+    }
     let body = body_json(&body);
     let (item_id, files, name) = files_for(&st, &auth.token, &id).await?;
     let wanted_source = field_str(&body, "MediaSourceId").or_else(|| q.get("mediasourceid").map(str::to_string));
@@ -221,7 +227,7 @@ pub async fn playback_info(State(st): State<Shared>, auth: Auth, Path(id): Path<
             src["SupportsDirectPlay"] = json!(false);
             src["SupportsDirectStream"] = json!(false);
             if enable_transcoding && f.probe.as_ref().is_some_and(|p| p.video.is_some()) {
-                let t = profile.as_ref().map(transcoding_profile).unwrap_or(Transcode { video_codecs: vec![], audio_codecs: vec![], container: "ts".into() });
+                let t = profile.as_ref().map(transcoding_profile).unwrap_or(Transcode { video_codecs: vec![], audio_codecs: vec![], container: "ts".into(), max_audio_channels: None });
                 let codec = t.video_codecs.iter().find(|c| ["h264", "hevc", "av1"].contains(&c.as_str())).cloned().unwrap_or_else(|| "h264".into());
                 let mut url = format!(
                     "/videos/{item_id}/master.m3u8?MediaSourceId={msid}&PlaySessionId={play_session}&api_key={}&VideoCodec={codec}&AudioCodec={}&TranscodingContainer={}",
@@ -285,7 +291,7 @@ async fn resolve_file(st: &Shared, token: &str, item: &str, q: &Q) -> ApiResult<
     file_from(st, token, q.get("mediasourceid"), Some(item)).await
 }
 
-fn proxy_response(resp: reqwest::Response, default_type: Option<&str>) -> Response {
+pub fn proxy_response(resp: reqwest::Response, default_type: Option<&str>) -> Response {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::OK);
     let mut out = Response::builder().status(status);
     for name in ["content-type", "content-length", "content-range", "accept-ranges", "last-modified", "etag", "cache-control"] {
@@ -404,17 +410,23 @@ async fn transcode_alive(st: &Shared, token: &str, sid: &str) -> bool {
     st.ciniva.raw(token, Method::GET, &format!("/transcode/{sid}/index.m3u8"), &HeaderMap::new()).await.is_ok_and(|r| r.status().is_success())
 }
 
-fn m3u8(body: String) -> Response {
+pub fn m3u8(body: String) -> Response {
     ([(header::CONTENT_TYPE, "application/vnd.apple.mpegurl"), (header::CACHE_CONTROL, "no-store")], body).into_response()
 }
 
-pub async fn master(State(st): State<Shared>, auth: Auth, Path(id): Path<String>, q: Q) -> ApiResult {
+pub async fn master(State(st): State<Shared>, auth: Auth, Path(id): Path<String>, q: Q, RawQuery(raw): RawQuery) -> ApiResult {
+    if let Some(hex) = livetv::channel_hex(&id) {
+        return livetv::master(&st, &auth, &hex, &q, raw.as_deref().unwrap_or("")).await;
+    }
     let (sid, request) = start_transcode(&st, &auth, &id, &q).await?;
     let bandwidth = request["bitrate_kbps"].as_i64().unwrap_or(8000) * 1000 + 192_000;
     Ok(m3u8(format!("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}\nhls/{sid}/index.m3u8?api_key={}\n", auth.token)))
 }
 
 pub async fn main_playlist(State(st): State<Shared>, auth: Auth, Path(id): Path<String>, q: Q) -> ApiResult {
+    if let Some(hex) = livetv::channel_hex(&id) {
+        return livetv::playlist(&st, &auth, &hex, &q).await;
+    }
     let (sid, _) = start_transcode(&st, &auth, &id, &q).await?;
     playlist(&st, &auth, &sid, &format!("hls/{sid}/")).await
 }
@@ -474,6 +486,9 @@ async fn stop_session(st: &Shared, token: &str, play_session: &str) {
 
 async fn report_position(st: &Shared, token: &str, item: Option<String>, source: Option<String>, ticks: Option<i64>) -> ApiResult<()> {
     let Some(ticks) = ticks else { return Ok(()) };
+    if [&item, &source].into_iter().flatten().any(|i| livetv::channel_hex(i).is_some()) {
+        return Ok(());
+    }
     let fid = file_from(st, token, source.as_deref(), item.as_deref()).await?;
     let f = st.ciniva.file(token, fid).await?;
     let duration_ms = f.duration.or_else(|| f.probe.as_ref().and_then(|p| p.duration)).map(|d| (d * 1000.0) as i64).unwrap_or(0);
@@ -550,6 +565,11 @@ pub async fn played(State(st): State<Shared>, auth: Auth, Path(params): Path<Vec
 
 pub async fn favorite(State(st): State<Shared>, auth: Auth, Path(params): Path<Vec<(String, String)>>, method: Method) -> ApiResult {
     let id = last_id(&params)?;
+    if let Some(hex) = livetv::channel_hex(&id) {
+        let on = method != Method::DELETE;
+        livetv::set_favourite(&st, &auth.token, &hex, on).await?;
+        return Ok(json(livetv::user_data(&id.replace('-', "").to_ascii_lowercase(), on)));
+    }
     let mut data = current_user_data(&st, &auth, &id).await.unwrap_or_else(|_| items::user_data(&id, 0, 0, false));
     data["IsFavorite"] = json!(method != Method::DELETE);
     Ok(json(data))
@@ -563,6 +583,10 @@ pub async fn get_user_data(State(st): State<Shared>, auth: Auth, Path(params): P
 pub async fn set_user_data(State(st): State<Shared>, auth: Auth, Path(params): Path<Vec<(String, String)>>, body: Bytes) -> ApiResult {
     let id = last_id(&params)?;
     let b = body_json(&body);
+    if let (Some(hex), Some(f)) = (livetv::channel_hex(&id), field_bool(&b, "IsFavorite")) {
+        livetv::set_favourite(&st, &auth.token, &hex, f).await?;
+        return Ok(json(current_user_data(&st, &auth, &id).await?));
+    }
     if let Some(p) = field_bool(&b, "Played") {
         mark(&st, &auth.token, &id, p).await?;
     }

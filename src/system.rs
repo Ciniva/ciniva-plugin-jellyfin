@@ -131,7 +131,7 @@ pub fn user_dto(st: &Shared, u: &User) -> Value {
             "EnableSharedDeviceControl": false,
             "EnableRemoteAccess": true,
             "EnableLiveTvManagement": false,
-            "EnableLiveTvAccess": false,
+            "EnableLiveTvAccess": true,
             "EnableMediaPlayback": true,
             "EnableAudioPlaybackTranscoding": true,
             "EnableVideoPlaybackTranscoding": true,
@@ -162,8 +162,15 @@ pub fn user_dto(st: &Shared, u: &User) -> Value {
     })
 }
 
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
 fn now_iso() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    iso_at(now_secs())
+}
+
+pub fn iso_at(secs: i64) -> String {
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -325,6 +332,9 @@ pub async fn image(State(st): State<Shared>, client: Client, Path(params): Path<
     let get = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     let id = get("id").ok_or_else(not_found)?;
     let kind = get("type").unwrap_or_else(|| "primary".into()).to_ascii_lowercase();
+    if let Some(hex) = crate::livetv::channel_hex(&id) {
+        return crate::livetv::image(&st, &client, &hex, &method).await;
+    }
     let token = st.ciniva.secret().map(str::to_string).or(client.token).ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "authorization required".into()))?;
     let tag = q.get("tag").map(str::to_string).or_else(|| get("tag")).filter(|t| valid_image_name(t));
     let name = match tag {

@@ -1,8 +1,9 @@
 use crate::{
     app::{json, not_found, ApiResult, Auth, Shared, Q},
-    ciniva::{Cast, Episode, File, Movie, MovieCard, SeasonCard, Show, ShowCard},
+    ciniva::{Cast, Episode, File, LiveChannel, Movie, MovieCard, SeasonCard, Show, ShowCard},
     ids::{Id, Kind},
     items::{self, Ctx},
+    livetv,
 };
 use axum::{
     extract::{Path, State},
@@ -20,6 +21,7 @@ pub enum Resolved {
     View(Kind),
     Root,
     Person(String, Cast),
+    Channel(LiveChannel),
 }
 
 pub fn ctx<'a>(st: &'a Shared, auth: &'a Auth) -> Ctx<'a> {
@@ -42,7 +44,8 @@ pub async fn resolve(st: &Shared, token: &str, raw: &str) -> ApiResult<Resolved>
             let ep = eps.into_iter().find(|e| e.id == id.id).ok_or_else(not_found)?;
             Resolved::Episode(show, ep)
         }
-        Kind::MoviesView | Kind::ShowsView => Resolved::View(id.kind),
+        Kind::MoviesView | Kind::ShowsView | Kind::LiveTvView => Resolved::View(id.kind),
+        Kind::Channel => Resolved::Channel(livetv::fetch(st, token, &id.channel_hex().unwrap_or_default()).await?),
         Kind::Root => Resolved::Root,
         Kind::MoviePerson => {
             let m = c.movie(token, id.parent).await?;
@@ -63,6 +66,7 @@ pub async fn item_value(st: &Shared, auth: &Auth, r: &Resolved) -> ApiResult<Val
         Resolved::Series(s) => items::show(&cx, s, None),
         Resolved::Season(s, c) => items::season(&cx, s, c),
         Resolved::Episode(s, e) => items::episode(&cx, s, e),
+        Resolved::View(Kind::LiveTvView) => livetv::view(&cx),
         Resolved::View(k) => {
             let count = if *k == Kind::MoviesView {
                 st.ciniva.movies(&auth.token, "title").await?.len()
@@ -73,6 +77,7 @@ pub async fn item_value(st: &Shared, auth: &Auth, r: &Resolved) -> ApiResult<Val
         }
         Resolved::Root => items::root(&cx),
         Resolved::Person(id, c) => items::person(&cx, id, c),
+        Resolved::Channel(c) => livetv::channel_item(&cx, c).ok_or_else(not_found)?,
     })
 }
 
@@ -390,6 +395,11 @@ fn adjacent(items: Vec<Value>, to: &str) -> Vec<Value> {
 }
 
 pub async fn list_items(State(st): State<Shared>, auth: Auth, q: Q) -> ApiResult {
+    let live_parent = q.get("parentid").and_then(Id::decode).is_some_and(|p| p.kind == Kind::LiveTvView);
+    let types = q.list("includeitemtypes");
+    if live_parent || (!types.is_empty() && types.iter().all(|t| t.eq_ignore_ascii_case("tvchannel"))) {
+        return livetv::channel_result(&st, &auth, &q).await;
+    }
     let mut all = filter(source(&st, &auth, &q).await?, &q);
     if q.list("sortby").is_empty() && q.get("parentid").is_none() && q.list("ids").is_empty() {
         all.sort_by(|a, b| cmp_by(a, b, "sortname"));
@@ -404,8 +414,12 @@ pub async fn list_items(State(st): State<Shared>, auth: Auth, q: Q) -> ApiResult
 }
 
 pub async fn views(st: &Shared, auth: &Auth) -> ApiResult<Vec<Value>> {
-    let (movies, shows) = tokio::try_join!(st.ciniva.movies(&auth.token, "title"), st.ciniva.shows(&auth.token, "title"))?;
-    Ok(vec![items::view(&ctx(st, auth), Kind::MoviesView, Some(movies.len())), items::view(&ctx(st, auth), Kind::ShowsView, Some(shows.len()))])
+    let (movies, shows, live) = tokio::join!(st.ciniva.movies(&auth.token, "title"), st.ciniva.shows(&auth.token, "title"), livetv::available(st, &auth.token));
+    let mut out = vec![items::view(&ctx(st, auth), Kind::MoviesView, Some(movies?.len())), items::view(&ctx(st, auth), Kind::ShowsView, Some(shows?.len()))];
+    if live {
+        out.push(livetv::view(&ctx(st, auth)));
+    }
+    Ok(out)
 }
 
 pub async fn user_views(State(st): State<Shared>, auth: Auth) -> ApiResult {

@@ -1,5 +1,6 @@
 //! Jellyfin item ids are 32 hex characters. Ours encode what the item is, so the bridge needs no database:
 //! `c1e0` magic, 2 hex kind, 10 hex parent (show id, or a person's owner), 4 hex season, 12 hex own id.
+//! A live channel's 64-bit id fills the season and own-id fields, so its 16 hex digits end the item id unchanged.
 
 use sha2::{Digest, Sha256};
 
@@ -18,6 +19,8 @@ pub enum Kind {
     MoviePerson = 9,
     ShowPerson = 10,
     Root = 11,
+    Channel = 12,
+    LiveTvView = 13,
 }
 
 impl Kind {
@@ -34,6 +37,8 @@ impl Kind {
             9 => Kind::MoviePerson,
             10 => Kind::ShowPerson,
             11 => Kind::Root,
+            12 => Kind::Channel,
+            13 => Kind::LiveTvView,
             _ => return None,
         })
     }
@@ -78,6 +83,20 @@ impl Id {
 
     pub fn view(kind: Kind) -> String {
         Id::new(kind, 0, 0, 0).encode()
+    }
+
+    /// The item id of an IPTV channel (16 hex digits).
+    pub fn channel(hex: &str) -> Option<String> {
+        if hex.len() != 16 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let v = u64::from_str_radix(hex, 16).ok()?;
+        Some(Id::new(Kind::Channel, 0, (v >> 48) as i64, (v & 0xffff_ffff_ffff) as i64).encode())
+    }
+
+    /// The IPTV channel id this item id carries.
+    pub fn channel_hex(&self) -> Option<String> {
+        (self.kind == Kind::Channel).then(|| format!("{:04x}{:012x}", self.season, self.id))
     }
 
     pub fn encode(&self) -> String {
@@ -142,6 +161,8 @@ mod tests {
             (Kind::MoviePerson, 9, 0, 4),
             (Kind::ShowPerson, 1_099_511_627_775, 0, 0),
             (Kind::Root, 0, 0, 0),
+            (Kind::Channel, 0, 0xf975, 0x8be9ce7e941a),
+            (Kind::LiveTvView, 0, 0, 0),
         ] {
             let s = Id::new(kind, parent, season, id).encode();
             assert_eq!(s.len(), 32, "{s}");
@@ -157,6 +178,22 @@ mod tests {
         assert_ne!(Id::episode(1, 1, 5), Id::episode(2, 1, 5));
         assert_eq!(Id::movie(1), "c1e00100000000000000000000000001");
         assert_eq!(Id::movie(1).len(), 32);
+    }
+
+    #[test]
+    fn channel_ids_carry_the_full_64_bits() {
+        for hex in ["f9758be9ce7e941a", "0000000000000001", "ffffffffffffffff"] {
+            let id = Id::channel(hex).unwrap();
+            assert_eq!(id.len(), 32);
+            assert!(id.ends_with(hex));
+            let decoded = Id::decode(&id).unwrap();
+            assert_eq!(decoded.kind, Kind::Channel);
+            assert_eq!(decoded.channel_hex().as_deref(), Some(hex));
+        }
+        assert_eq!(Id::channel("F9758BE9CE7E941A"), Id::channel("f9758be9ce7e941a"));
+        assert_eq!(Id::channel("f9758be9ce7e941"), None);
+        assert_eq!(Id::channel("f9758be9ce7e941g"), None);
+        assert_eq!(Id::decode(&Id::movie(5)).unwrap().channel_hex(), None);
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod ciniva;
 mod ids;
 mod items;
 mod library;
+mod livetv;
 mod playback;
 mod register;
 mod system;
@@ -57,6 +58,7 @@ async fn fallback(req: Request) -> StatusCode {
 
 fn routes() -> Router<app::Shared> {
     use library as l;
+    use livetv as lt;
     use playback as p;
     use system as s;
     Router::new()
@@ -92,7 +94,20 @@ fn routes() -> Router<app::Shared> {
         .route("/items/suggestions", get(s::empty_result))
         .route("/items/{id}/ancestors", get(l::ancestors))
         .route("/items/{id}/collections", get(s::empty_list))
-        .route("/livetv/programs", get(s::empty_result))
+        .route("/livetv/info", get(lt::info))
+        .route("/livetv/guideinfo", get(lt::guide_info))
+        .route("/livetv/channels", get(lt::channels))
+        .route("/livetv/channels/{id}", get(lt::channel))
+        .route("/livetv/programs", get(lt::empty_guide).post(lt::empty_guide))
+        .route("/livetv/programs/recommended", get(lt::empty_guide))
+        .route("/livetv/recordings", get(lt::empty_guide))
+        .route("/livetv/recordings/folders", get(lt::empty_guide))
+        .route("/livetv/recordings/groups", get(lt::empty_guide))
+        .route("/livetv/recordings/series", get(lt::empty_guide))
+        .route("/livetv/timers", get(lt::empty_guide))
+        .route("/livetv/seriestimers", get(lt::empty_guide))
+        .route("/videos/{id}/live.m3u8", get(lt::live_playlist))
+        .route("/videos/{id}/live/{sid}/{seg}", get(lt::segment))
         .route("/items/{id}/similar", get(s::empty_result))
         .route("/shows/{id}/similar", get(s::empty_result))
         .route("/movies/{id}/similar", get(s::empty_result))
@@ -155,8 +170,6 @@ fn routes() -> Router<app::Shared> {
         .route("/studios", get(s::empty_result))
         .route("/persons", get(s::empty_result))
         .route("/artists", get(s::empty_result))
-        .route("/livetv/programs/recommended", get(s::empty_result))
-        .route("/livetv/channels", get(s::empty_result))
         .route("/clientlog/document", post(s::no_content))
         .route("/socket", any(s::socket))
         .route("/items/{id}/images", get(s::image_infos))
@@ -184,6 +197,15 @@ async fn main() {
         public_url: public_url.clone(),
         version: env("JELLYFIN_VERSION").unwrap_or_else(|| "10.11.11".into()),
         transcodes: Default::default(),
+        live: Default::default(),
+        logos: Default::default(),
+        logo_cache: Default::default(),
+        web: reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(15))
+            .user_agent("Mozilla/5.0")
+            .build()
+            .expect("http client"),
     });
     if secret.is_some() {
         tokio::spawn(register::run(state.ciniva.clone(), plugin_url.clone(), public_url.unwrap_or(plugin_url)));

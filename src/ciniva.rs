@@ -108,6 +108,44 @@ impl Client {
     pub async fn home(&self, token: &str) -> Result<Home> {
         self.get(token, "/home").await
     }
+
+    pub async fn plugin_online(&self, token: &str, id: &str) -> bool {
+        self.get::<Vec<PluginInfo>>(token, "/plugins").await.is_ok_and(|l| l.iter().any(|p| p.id == id && p.online))
+    }
+
+    /// IPTV channels; `query` is the plugin's `ui/channels` query string.
+    pub async fn channels(&self, token: &str, query: &str) -> Result<ChannelList> {
+        self.get(token, &format!("/plugins/{IPTV}/ui/channels?{query}")).await
+    }
+}
+
+pub const IPTV: &str = "iptv";
+
+#[derive(Deserialize)]
+struct PluginInfo {
+    id: String,
+    #[serde(default)]
+    online: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct LiveChannel {
+    pub id: String,
+    pub number: Option<i64>,
+    pub name: String,
+    pub logo: Option<String>,
+    pub groups: Vec<String>,
+    pub tvg_id: Option<String>,
+    pub favourite: bool,
+    pub health: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ChannelList {
+    pub channels: Vec<LiveChannel>,
+    pub total: Option<usize>,
 }
 
 #[derive(Deserialize)]

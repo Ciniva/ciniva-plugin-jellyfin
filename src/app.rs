@@ -17,6 +17,13 @@ pub struct State {
     /// PlaySessionId → Ciniva transcode session and the request that started it, so repeated playlist requests reuse
     /// it and stopping playback stops it.
     pub transcodes: Mutex<HashMap<String, (String, serde_json::Value)>>,
+    /// Live channel and request → Ciniva live session.
+    pub live: Mutex<HashMap<String, String>>,
+    /// IPTV channel id → logo URL, from channel lists.
+    pub logos: Mutex<HashMap<String, String>>,
+    pub logo_cache: Mutex<HashMap<String, (String, bytes::Bytes)>>,
+    /// For channel logos on other sites.
+    pub web: reqwest::Client,
 }
 
 pub type Shared = Arc<State>;

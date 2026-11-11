@@ -4,6 +4,15 @@ A Jellyfin-compatible API in front of [Ciniva](https://github.com/Ciniva/ciniva)
 Tizen, Roku), Swiftfin, Infuse and Findroid can browse, play (direct or through Ciniva's GPU transcoding) and sync
 progress. Users sign in with their Ciniva accounts; the bridge keeps no state of its own.
 
+## Live TV
+
+When Ciniva's [IPTV plugin](https://github.com/Ciniva/ciniva-plugin-iptv) is online, a **Live TV** view appears with
+its channels (the groups the administrator chose, each user's favourites first when the app asks). There is no
+programme guide yet, so guides show channels without programmes. A channel plays as live HLS: the bridge starts
+Ciniva's live session with the codecs the app's DeviceProfile lists (copying the channel's video when it can,
+MPEG-TS segments on Tizen) and relays the rolling playlist and segments. Channel logos are fetched from the playlist's
+URLs by the bridge, so apps never contact those sites. The bridge needs internet access for logos.
+
 ## Image
 
 `ghcr.io/ciniva/ciniva-plugin-jellyfin` (published by GitHub Actions for `vX.Y.Z` tags matching `Cargo.toml` as
